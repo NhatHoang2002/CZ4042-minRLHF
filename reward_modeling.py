@@ -16,25 +16,25 @@ class ScriptArguments:
     # Basic training parameters
     model_name_or_path: Optional[str] = field(metadata={"help": "the location of the SFT model name or path (e.g., 'saved/model_sft/')"})
     output_dir: Optional[str] = field(metadata={"help": "the output directory (e.g., 'saved/model_dpo/')"})
-    num_train_epochs: Optional[float] = field(default=5.0, metadata={"help": "number of training epochs"})
+    num_train_epochs: Optional[float] = field(default=2.0, metadata={"help": "number of training epochs"})
     max_steps: Optional[int] = field(default=-1, metadata={"help": "max number of training steps, set to a positive number will override num_train_epochs"})
     per_device_train_batch_size: Optional[int] = field(default=4, metadata={"help": "train batch size per device"})
-    per_device_eval_batch_size: Optional[int] = field(default=32, metadata={"help": "eval batch size per device"})
-    gradient_accumulation_steps: Optional[int] = field(default=4, metadata={"help": "the number of gradient accumulation steps"})
+    per_device_eval_batch_size: Optional[int] = field(default=8, metadata={"help": "eval batch size per device"})
+    gradient_accumulation_steps: Optional[int] = field(default=32, metadata={"help": "the number of gradient accumulation steps"})
     gradient_checkpointing: Optional[bool] = field(default=False, metadata={"help": "whether to use gradient checkpointing"})
     resume_from_checkpoint: Optional[bool] = field(default=False, metadata={"help": "If you want to resume training where it left off."})
 
     # Logging and saving parameters
-    logging_steps: Optional[int] = field(default=10, metadata={"help": "the logging frequency"})
-    save_steps: Optional[int] = field(default=50, metadata={"help": "the saving frequency"})
-    eval_steps: Optional[int] = field(default=100, metadata={"help": "the evaluation frequency"})
+    logging_steps: Optional[int] = field(default=8, metadata={"help": "the logging frequency"})
+    save_steps: Optional[int] = field(default=8, metadata={"help": "the saving frequency"})
+    eval_steps: Optional[int] = field(default=250, metadata={"help": "the evaluation frequency"})
 
     # Optimization parameters
-    learning_rate: Optional[float] = field(default=1e-4, metadata={"help": "optimizer learning rate"})
+    learning_rate: Optional[float] = field(default=2e-5, metadata={"help": "optimizer learning rate"})
     lr_scheduler_type: Optional[str] = field(default="cosine", metadata={"help": "the lr scheduler type"})
     warmup_ratio: Optional[float] = field(default=0.1, metadata={"help": "the number of warmup steps"})
-    weight_decay: Optional[float] = field(default=0.001, metadata={"help": "the weight decay"})
-    optimizer_type: Optional[str] = field(default="paged_adamw_32bit", metadata={"help": "the optimizer type"})
+    weight_decay: Optional[float] = field(default=0.0, metadata={"help": "the weight decay"})
+    optimizer_type: Optional[str] = field(default="adamw_torch", metadata={"help": "the optimizer type"})
 
     # LoRA config
     lora_alpha: Optional[float] = field(default=32, metadata={"help": "the lora alpha parameter"})
@@ -43,8 +43,6 @@ class ScriptArguments:
 
     # Data parameters
     dataset_names: Optional[str] = field(default="hh", metadata={"help": "the dataset names, e.g. 'hh,shp'"})
-    packing: Optional[bool] = field(default=True, metadata={"help": "whether to use packing for SFTTrainer"})
-    group_by_length: Optional[bool] = field(default=False, metadata={"help": "whether to group the dataset by sequence length during training"})
 
     # Sequence length parameters
     max_prompt_length: Optional[int] = field(default=512, metadata={"help": "the maximum prompt length"})
@@ -115,11 +113,9 @@ if __name__ == "__main__":
     parser = HfArgumentParser(ScriptArguments)
     script_args = parser.parse_args_into_dataclasses()[0]
     script_args.dataset_names = script_args.dataset_names.split(',')
+    script_args.run_name = script_args.output_dir.split('/')[-1]
 
     # 0. check arguments conflict
-    if script_args.group_by_length and script_args.packing:
-        raise ValueError("Cannot use both packing and group by length")
-
     # `gradient_checkpointing` was True by default until `1f3314`, but it's actually not used.
     # `gradient_checkpointing=True` will cause `Variable._execution_engine.run_backward`.
     if script_args.gradient_checkpointing:
@@ -130,7 +126,7 @@ if __name__ == "__main__":
         r=script_args.lora_r,
         lora_alpha=script_args.lora_alpha,
         lora_dropout=script_args.lora_dropout,
-        target_modules=["c_attn", "c_proj", "c_fc", "c_proj", "lm_head"],
+        target_modules=["c_attn", "c_proj", "c_fc", "c_proj"],
         inference_mode=False,
         task_type="SEQ_CLS"
     )
@@ -162,13 +158,13 @@ if __name__ == "__main__":
         lambda batch: preprocess_function(tokenizer, batch, script_args.max_length),
         batched=True,
         remove_columns=train_dataset.column_names,
-        num_proc=int(multiprocessing.cpu_count())
+        num_proc=int(multiprocessing.cpu_count() * 0.9)
     )
     eval_dataset = eval_dataset.map(
         lambda batch: preprocess_function(tokenizer, batch, script_args.max_length),
         batched=True,
         remove_columns=eval_dataset.column_names,
-        num_proc=int(multiprocessing.cpu_count())
+        num_proc=int(multiprocessing.cpu_count() * 0.9)
     )
 
     print("Train dataset length:", len(train_dataset))
@@ -178,7 +174,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         # Basic training parameters
         output_dir=script_args.output_dir,
-        run_name=script_args.output_dir.split('/')[-1],
+        run_name=script_args.run_name,
         num_train_epochs=script_args.num_train_epochs,
         max_steps=script_args.max_steps,
         per_device_train_batch_size=script_args.per_device_train_batch_size,
@@ -190,6 +186,7 @@ if __name__ == "__main__":
         eval_steps=script_args.eval_steps,
         logging_steps=script_args.logging_steps,
         save_steps=script_args.save_steps,
+        save_total_limit=3,
 
         # Optimization parameters
         learning_rate=script_args.learning_rate,
@@ -212,6 +209,7 @@ if __name__ == "__main__":
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        max_length=script_args.max_length,
         peft_config=peft_config
     )
     print_trainable_parameters(trainer.model)

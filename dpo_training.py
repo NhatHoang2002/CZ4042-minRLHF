@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -14,25 +13,25 @@ class ScriptArguments:
     # Basic training parameters
     model_name_or_path: Optional[str] = field(metadata={"help": "the location of the SFT model name or path (e.g., 'saved/model_sft/')"})
     output_dir: Optional[str] = field(metadata={"help": "the output directory (e.g., 'saved/model_dpo/')"})
-    num_train_epochs: Optional[float] = field(default=3.0, metadata={"help": "number of training epochs"})
+    num_train_epochs: Optional[float] = field(default=2.0, metadata={"help": "number of training epochs"})
     max_steps: Optional[int] = field(default=-1, metadata={"help": "max number of training steps, set to a positive number will override num_train_epochs"})
-    per_device_train_batch_size: Optional[int] = field(default=2, metadata={"help": "train batch size per device"})
-    per_device_eval_batch_size: Optional[int] = field(default=16, metadata={"help": "eval batch size per device"})
-    gradient_accumulation_steps: Optional[int] = field(default=8, metadata={"help": "the number of gradient accumulation steps"})
+    per_device_train_batch_size: Optional[int] = field(default=4, metadata={"help": "train batch size per device"})
+    per_device_eval_batch_size: Optional[int] = field(default=8, metadata={"help": "eval batch size per device"})
+    gradient_accumulation_steps: Optional[int] = field(default=2, metadata={"help": "the number of gradient accumulation steps"})
     gradient_checkpointing: Optional[bool] = field(default=False, metadata={"help": "whether to use gradient checkpointing"})
     resume_from_checkpoint: Optional[bool] = field(default=False, metadata={"help": "If you want to resume training where it left off."})
 
     # Logging and saving parameters
-    logging_steps: Optional[int] = field(default=4, metadata={"help": "the logging frequency"})
-    save_steps: Optional[int] = field(default=16, metadata={"help": "the saving frequency"})
-    eval_steps: Optional[int] = field(default=1000, metadata={"help": "the evaluation frequency"})
+    logging_steps: Optional[int] = field(default=8, metadata={"help": "the logging frequency"})
+    save_steps: Optional[int] = field(default=8, metadata={"help": "the saving frequency"})
+    eval_steps: Optional[int] = field(default=250, metadata={"help": "the evaluation frequency"})
 
     # Optimization parameters
     learning_rate: Optional[float] = field(default=5e-7, metadata={"help": "optimizer learning rate"})
-    lr_scheduler_type: Optional[str] = field(default="cosine", metadata={"help": "the lr scheduler type"})
+    lr_scheduler_type: Optional[str] = field(default="linear", metadata={"help": "the lr scheduler type"})
     warmup_ratio: Optional[float] = field(default=0.1, metadata={"help": "the number of warmup steps"})
     weight_decay: Optional[float] = field(default=0.0, metadata={"help": "the weight decay"})
-    optimizer_type: Optional[str] = field(default="paged_adamw_32bit", metadata={"help": "the optimizer type"})
+    optimizer_type: Optional[str] = field(default="adamw_torch", metadata={"help": "the optimizer type"})
 
     # LoRA config
     lora_alpha: Optional[float] = field(default=32, metadata={"help": "the lora alpha parameter"})
@@ -71,6 +70,7 @@ if __name__ == "__main__":
     parser = HfArgumentParser(ScriptArguments)
     script_args = parser.parse_args_into_dataclasses()[0]
     script_args.dataset_names = script_args.dataset_names.split(',')
+    script_args.run_name = script_args.output_dir.split('/')[-1]
 
     # 0. check arguments conflict
     # `gradient_checkpointing` was True by default until `1f3314`, but it's actually not used.
@@ -79,6 +79,16 @@ if __name__ == "__main__":
         raise ValueError("gradient_checkpointing not supported")
 
     # 1. load a pretrained model
+    peft_config = LoraConfig(
+        r=script_args.lora_r,
+        lora_alpha=script_args.lora_alpha,
+        lora_dropout=script_args.lora_dropout,
+        fan_in_fan_out=True,
+        target_modules=["c_attn", "c_proj", "c_fc", "c_proj"],
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
     model = AutoPeftModelForCausalLM.from_pretrained(
         script_args.model_name_or_path,
         torch_dtype=torch.bfloat16,
@@ -110,7 +120,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         # Basic training parameters
         output_dir=script_args.output_dir,
-        run_name=script_args.output_dir.split('/')[-1],
+        run_name=script_args.run_name,
         num_train_epochs=script_args.num_train_epochs,
         max_steps=script_args.max_steps,
         per_device_train_batch_size=script_args.per_device_train_batch_size,
@@ -122,6 +132,7 @@ if __name__ == "__main__":
         eval_steps=script_args.eval_steps,
         logging_steps=script_args.logging_steps,
         save_steps=script_args.save_steps,
+        save_total_limit=3,
 
         # Optimization parameters
         learning_rate=script_args.learning_rate,
@@ -134,15 +145,6 @@ if __name__ == "__main__":
         gradient_checkpointing=script_args.gradient_checkpointing,
         remove_unused_columns=False,
         report_to=script_args.report_to,
-    )
-
-    peft_config = LoraConfig(
-        r=script_args.lora_r,
-        lora_alpha=script_args.lora_alpha,
-        lora_dropout=script_args.lora_dropout,
-        target_modules=None,
-        bias="none",
-        task_type="CAUSAL_LM",
     )
 
     # 5. initialize the DPO trainer

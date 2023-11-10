@@ -1,87 +1,7 @@
 import multiprocessing
 import datasets
-from collections import defaultdict
 import pandas as pd
-import tqdm
-from bs4 import BeautifulSoup, NavigableString
 
-
-def strip_html_tags(html_string):
-    """Strip HTML tags from a string, except for <code> tags (which contain real code in the StackExchange answers)."""
-    # Create a BeautifulSoup object
-    soup = BeautifulSoup(html_string, 'html.parser')
-
-    # Initialize an empty list to store the text
-    text = []
-    for element in soup.children:
-        if isinstance(element, NavigableString):
-            continue
-        if element.name == 'p':
-            text.append(''.join(child.string for child in element.children if isinstance(child, NavigableString)))
-        elif element.name == 'pre':
-            for code in element.find_all('code'):
-                text.append("<code>" + code.get_text() + "</code>")
-        elif element.name == 'code':
-            text.append("<code>" + element.get_text() + "</code>")
-
-    # Join the text together with newlines in between
-    text = "\n\n".join(text)
-
-    return text
-
-def get_se(split, sft_mode=False, cache_dir=None):
-    """Load the StackExchange dataset from Huggingface, and return a dict of prompts and responses. See get_hh for the format.
-    
-       We strip the HTML tags from the responses (except for <code> tags), and we add necessary newlines.
-    """
-    print(f'Loading SE dataset ({split} split) from Huggingface...')
-    dataset = datasets.load_dataset('HuggingFaceH4/stack-exchange-preferences', cache_dir=cache_dir)['train']
-    print('done')
-
-    # shuffle the dataset and select 1% for test
-    dataset = dataset.shuffle(seed=42)
-    dataset = dataset.select(range(int(len(dataset) * 0.01))) if split == 'test' else dataset.select(
-        range(int(len(dataset) * 0.01), len(dataset)))
-
-    def strip_html(x):
-        x['question'] = strip_html_tags(x['question'])
-        for a in x['answers']:
-            a['text'] = strip_html_tags(a['text'])
-        return x
-
-    dataset = dataset.map(strip_html, num_proc=64)
-
-    data = []
-    for row in tqdm.tqdm(dataset, desc='Processing SE'):
-        prompt = '\n### Human: ' + row['question'] + '\n### Assistant:'
-        responses = [' ' + a['text'] for a in row['answers']]
-        scores = [a['pm_score'] for a in row['answers']]
-
-        pairs = []
-        for i in range(len(responses)):
-            for j in range(i + 1, len(responses)):
-                pairs.append((i, j) if scores[i] > scores[j] else (j, i))
-
-        data[prompt]['responses'] = responses
-        data[prompt]['pairs'] = pairs
-        data[prompt]['sft_target'] = max(responses, key=lambda x: scores[responses.index(x)])
-
-    data = defaultdict(dict)
-    for row in tqdm.tqdm(dataset, desc='Processing SE'):
-        prompt = '\n### Human: ' + row['question'] + '\n### Assistant:'
-        responses = [' ' + a['text'] for a in row['answers']]
-        scores = [a['pm_score'] for a in row['answers']]
-
-        pairs = []
-        for i in range(len(responses)):
-            for j in range(i + 1, len(responses)):
-                pairs.append((i, j) if scores[i] > scores[j] else (j, i))
-
-        data[prompt]['responses'] = responses
-        data[prompt]['pairs'] = pairs
-        data[prompt]['sft_target'] = max(responses, key=lambda x: scores[responses.index(x)])
-
-    return data
 
 def get_shp(split: str, cache_dir: str = None) -> datasets.Dataset:
     """Load the Stanford Human Preferences dataset from Huggingface and convert it to the necessary format. See hh for the format.
@@ -114,10 +34,7 @@ def get_shp(split: str, cache_dir: str = None) -> datasets.Dataset:
 
 def extract_anthropic_prompt(prompt_and_response):
     """Extract the anthropic prompt from a prompt and response pair."""
-    prompt_and_response = prompt_and_response.replace('\n\nHuman:', '\n### Human:')
-    prompt_and_response = prompt_and_response.replace('\n\nAssistant:', '\n### Assistant:')
-
-    search_term = '\n### Assistant:'
+    search_term = '\n\nAssistant:'
     search_term_idx = prompt_and_response.rfind(search_term)
     assert search_term_idx != -1, f"Prompt and response does not contain '{search_term}'"
     return prompt_and_response[:search_term_idx + len(search_term)]
@@ -139,9 +56,12 @@ def get_hh(split: str, cache_dir: str = None) -> datasets.Dataset:
         prompts, chosen_responses, rejected_responses = [], [], []
         for chosen, reject in zip(samples['chosen'], samples['rejected']):
             prompt = extract_anthropic_prompt(chosen)
-            prompts.append(prompt)
             chosen_responses.append(chosen[len(prompt):])
             rejected_responses.append(reject[len(prompt):])
+
+            prompt = prompt.replace('\n\nHuman:', '\n### Human:')
+            prompt = prompt.replace('\n\nAssistant:', '\n### Assistant:')
+            prompts.append(prompt)
 
         return {
             'prompt': prompts,
@@ -229,8 +149,6 @@ def get_dataset(names: str, split: str, sft_mode: bool = False, cache_dir: str =
             data = get_uc(split, cache_dir=cache_dir)
         elif name == 'ufb':
             data = get_ufb(split, cache_dir=cache_dir)
-        # elif name == 'se':
-        #     data = get_se(split, sft_mode=sft_mode, cache_dir=cache_dir)
         else:
             raise ValueError(f"Unknown dataset '{name}'")
 
